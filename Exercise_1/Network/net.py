@@ -1,14 +1,18 @@
-from Network.data_loader import *
+from Network.data_loader import full_data_generator, full_stochastic_generator
+import numpy as np
+import pickle
+import os
 
 
 class WeightInit:
     # Got to be careful, if weights are too large then it might explode
+    @staticmethod
     def gaussian_init(layer):
         layer.w = np.random.normal(scale=0.05, size=layer.w.shape)
         layer.b = np.zeros_like(layer.b)
 
-    @staticmethod
     # The one which is better for ReLU
+    @staticmethod
     def xavier_init_gauss(layer):
         # number of n_in +  number of n_out // Could be also just the number of n_in
         n = layer.w.shape[0] + layer.w.shape[1]
@@ -85,10 +89,12 @@ class Activation:
             exp = np.exp(x_n)
             return exp / np.sum(exp, axis=1, keepdims=True)
 
+        # Softmax derivative is a little bit more complex (Jacobian matrix)
+        # It's better to use CrossEntropyLoss with logits because some
+        # equations will simplify
         @staticmethod
         def f_d(x):
-            # Trick, complete loss is returned by Objective SoftmaxMaxLikelihood
-            return np.ones_like(x)
+            raise NotImplementedError
 
 
 # In decay(self, t) 't' should start from 0
@@ -153,6 +159,9 @@ class Solver:
         def advance(self):
             self.t += 1
 
+        def compute_update(self, layer):
+            raise NotImplementedError
+
     class Simple(Base):
         def __init__(self, decay_algorithm, alpha=0):
             super().__init__()
@@ -166,10 +175,10 @@ class Solver:
             return w_update, b_update
 
         def __str__(self):
-            return  "Solver Simple \n" +\
-                    "Alpha: %f \n" % self.alpha +\
-                    "decay_algorithm: \n" +\
-                    self.decay_algorithm.__str__()
+            return "Solver Simple \n" + \
+                   "Alpha: %f \n" % self.alpha + \
+                   "decay_algorithm: \n" + \
+                   self.decay_algorithm.__str__()
 
     class Momentum(Base):
         def __init__(self, decay_algorithm, momentum_rate, alpha=0):
@@ -187,13 +196,13 @@ class Solver:
 
         def compute_update(self, layer):
             learning_rate = self.decay_algorithm.learning_rate(self.t)
-            momentum_w = self.momentum_rate * layer.momentum_w -\
+            momentum_w = self.momentum_rate * layer.momentum_w - \
                          learning_rate * (layer.dw + self.alpha * layer.w)
-            momentum_b = self.momentum_rate * layer.momentum_b -\
+            momentum_b = self.momentum_rate * layer.momentum_b - \
                          learning_rate * (layer.db + self.alpha * layer.b)
             return momentum_w, momentum_b
 
-        # Add new attribute to layer class
+        # Add new attribute to the layer class
         def advance(self):
             learning_rate = self.decay_algorithm.learning_rate(self.t)
             for layer in self.network.layers:
@@ -204,16 +213,16 @@ class Solver:
             self.t += 1
 
         def __str__(self):
-            return  "Solver Momentum \n" +\
-                    "Momentum Rate: %f \n" % self.momentum_rate +\
-                    "Alpha: %f \n" % self.alpha +\
-                    "decay_algorithm: \n" +\
-                    self.decay_algorithm.__str__()
+            return "Solver Momentum \n" + \
+                   "Momentum Rate: %f \n" % self.momentum_rate + \
+                   "Alpha: %f \n" % self.alpha + \
+                   "decay_algorithm: \n" + \
+                   self.decay_algorithm.__str__()
 
 
 # Loss is Nx1 np.array ('N' is num of samples in the batch)
 # f(pred, targ) - Loss function
-# f_d(pred, targ) - Derivative w.r.t. pred over loss
+# f_d(pred, targ) - Derivative of loss w.r.t. pred
 class Objective:
     class Squared:
         @staticmethod
@@ -224,12 +233,22 @@ class Objective:
         def loss_d(pred, targ):
             return np.array(pred - targ)
 
-    class SoftmaxMaxLikelihood:
+    class CrossEntropyWithLogits:
         @staticmethod
         def loss(pred, targ):
-            return np.mean(-targ*np.log(np.maximum(pred, 1e-15)), axis=1)
+            # If prediction is 0 we have numerical problems
 
-        # Trick assume that softmax layer returns np.ones_line(x) when f_d(x) called
+            # Subtracting a constant from each prediction does not change the output
+            # but improves the numerical stability
+            max_pred = np.max(pred, axis=1, keepdims=True)
+            pred = pred - max_pred
+
+            exp = np.exp(pred)
+            probabilities = exp / np.sum(exp, axis=1, keepdims=True)
+            probabilities = np.maximum(probabilities, 1e-15)
+
+            return np.mean(-targ*np.log(probabilities), axis=1)
+
         @staticmethod
         def loss_d(pred, targ):
             return pred - targ
@@ -237,7 +256,7 @@ class Objective:
 
 class Metric:
     @staticmethod
-    def acc(pred, targ):
+    def accuracy(pred, targ):
         p = np.argmax(pred, axis=1)
         t = np.argmax(targ, axis=1)
         acc = np.sum(p == t)/len(p)
@@ -254,7 +273,7 @@ class Net(object):
         self.layers.append(layer)
 
     # One way to train is to call one_interation()
-    # Weights will be updated after single batch
+    # Weights will be updated after a single batch
     def one_iteration(self, x, y):
         p = self.predict(x)
         self._backward_pass(p, y)
@@ -297,7 +316,7 @@ class Net(object):
             y_list.append(y_)
         prediction = np.concatenate(prediction_list, axis=0)
         y = np.concatenate(y_list, axis=0)
-        acc = Metric.acc(prediction, y)
+        acc = Metric.accuracy(prediction, y)
         loss = np.mean(self.loss(prediction, y))
         return acc, loss
 
@@ -305,6 +324,8 @@ class Net(object):
         return self.objective.loss(pred=p, targ=y)
 
     def save_net(self, filename):
+        path, file = os.path.split(filename)
+        os.makedirs(path, exist_ok=True)
         with open(filename, 'wb') as f:
             p = pickle.Pickler(f)
             p.dump(self)

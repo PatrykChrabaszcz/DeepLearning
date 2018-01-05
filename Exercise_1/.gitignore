@@ -1,4 +1,11 @@
 # Byte-compiled / optimized / DLL files
+
+#Experiments
+Experiments/
+
+#MNIST dataset
+data/
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,8 +13,6 @@ __pycache__/
 # C extensions
 *.so
 
-#MNIST dataset
-data/
 
 #Env
 .idea/
@@ -95,5 +100,3 @@ ENV/
 # Rope project settings
 .ropeproject
 
-#Experiments
-Experiments/

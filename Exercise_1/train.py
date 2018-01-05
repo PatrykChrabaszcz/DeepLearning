@@ -17,12 +17,15 @@ STOCHASTIC = 3
 
 method_name = ['', 'FULL_BATCH', 'STOCHASTIC_FULL', 'STOCHASTIC']
 
+# We have 10 classes in MNIST dataset
+NUM_CLASSES = 10
+
 
 # hidden_size list with number of neurons in each layer
 # doesn't include output and input layers
-def create_network(solver, hidden_size=[], alpha=0):
+def create_network(hidden_size=()):
 
-    network = Net(solver=solver, objective=Objective.SoftmaxMaxLikelihood)
+    network = Net(solver=solver, objective=Objective.CrossEntropyWithLogits)
 
     # init_func = WeightInit.gaussian_init
     init_func = WeightInit.xavier_init_gauss
@@ -34,11 +37,9 @@ def create_network(solver, hidden_size=[], alpha=0):
         network.add_layer(layer)
         input_size_info = layer
 
-    layer = DenseLayer(activation=Activation.Softmax, init_func=init_func,
-                       input_size_info=layer, neurons_num=10)
+    layer = DenseLayer(activation=Activation.Linear, init_func=init_func,
+                       input_size_info=input_size_info, neurons_num=10)
     network.add_layer(layer)
-
-    solver.set_network(network)
 
     return network
 
@@ -62,13 +63,14 @@ if __name__ == "__main__":
 
     lr_decay = LRDecay.StepDecay(learning_rate=0.75, step=20, rate=0.5)
 
-    solver = Solver.Simple(decay_algorithm=lr_decay)
+    solver = Solver.Simple(decay_algorithm=lr_decay, alpha=0.00001)
     # solver = Solver.Momentum(decay_algorithm=lr_decay, momentum_rate=0.9)
 
     hidden_size = [900]
     learning_method = STOCHASTIC
     batch_size = 512
-    network = create_network(solver=solver, hidden_size=hidden_size, alpha=0.00001)
+    network = create_network(hidden_size=hidden_size)
+    solver.set_network(network)
 
     # Saves information about the training
     history = History(solver=network.solver, hidden_size=hidden_size, method=method_name[learning_method],
@@ -80,7 +82,6 @@ if __name__ == "__main__":
     best_val_loss = np.inf
 
     while True:
-
         # Full batch learning
         if learning_method == FULL_BATCH:
             for x, y in full_data_generator(X_train, y_train, 10000):
