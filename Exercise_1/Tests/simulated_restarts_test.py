@@ -14,5 +14,5 @@ if __name__ == "__main__":
     for i in t:
         y.append(decay.learning_rate(i))
 
-    plt.plot(t, np.log(y))
+    plt.plot(t, y)
     plt.show()

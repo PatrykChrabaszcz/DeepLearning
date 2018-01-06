@@ -4,7 +4,7 @@ import numpy as np
 from Network.history import *
 
 
-history = History.load("Experiments/Experiment_102_history")
+history = History.load("Experiments/Experiment_100_history")
 sns.set_style("darkgrid")
 print(history.iter)
 print(history.valid_acc)

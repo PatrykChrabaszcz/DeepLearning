@@ -1,132 +1,103 @@
 from Network.net import *
 from Network.history import *
 from Network.data_loader import *
+import click
+from utils import create_network, check_performance, Stats
 
-# Script to train network with user defined parameters
-
-# Parameters update after whole batch is processed
-FULL_BATCH = 1
-# Shuffle the data at the beginning and then return chunks
-# and update parameters after each chunk is processed.
-# Advance solver after epoch.
-STOCHASTIC_FULL = 2
-# Take random samples from the data and update parameters
-# after those samples are processed.
-# Advance solver after one batch.
-STOCHASTIC = 3
-
-method_name = ['', 'FULL_BATCH', 'STOCHASTIC_FULL', 'STOCHASTIC']
+# Script to train network with user user defined parameters
 
 # We have 10 classes in MNIST dataset
 NUM_CLASSES = 10
 
 
-# hidden_size list with number of neurons in each layer
-# doesn't include output and input layers
-def create_network(hidden_size=()):
+@click.command()
+@click.option('--training_method', type=click.Choice(['epoch_gd', 'epoch_sgd', 'random_sgd']), default='epoch_sgd',
+              help='epoch_gd: One weight update after processing all data from the dataset.\n'
+                   'epoch_sgd: One weight update after each mini-batch of data, data shuffled after each epoch.\n'
+                   'random_sgd: One weight update after each mini-batch of data, data shuffled after each iteration.')
+@click.option('--experiment_number', type=int, default=100)
+@click.option('--batch_size', type=int, default=128)
+def main(training_method, experiment_number, batch_size):
+    # Load the data
+    (x_train, y_train), (x_val, y_val), (x_test, y_test) = mnist()
 
-    network = Net(solver=solver, objective=Objective.CrossEntropyWithLogits)
-
-    # init_func = WeightInit.gaussian_init
-    init_func = WeightInit.xavier_init_gauss
-
-    input_size_info = 784
-    for size in hidden_size:
-        layer = DenseLayer(activation=Activation.Relu, init_func=init_func,
-                           input_size_info=input_size_info, neurons_num=size)
-        network.add_layer(layer)
-        input_size_info = layer
-
-    layer = DenseLayer(activation=Activation.Linear, init_func=init_func,
-                       input_size_info=input_size_info, neurons_num=10)
-    network.add_layer(layer)
-
-    return network
-
-
-if __name__ == "__main__":
-    # Load data
-    Dtrain, Dval, Dtest = mnist()
-    X_train, y_train = Dtrain
-    X_val, y_val = Dval
-    X_test, y_test = Dtest
-    X_train = np.concatenate([X_train, X_val])
+    x_train = np.concatenate([x_train, x_val])
     y_train = np.concatenate([y_train, y_val])
-    X_val = X_test
-    y_val = y_test
-
-    experiment_number = 103
 
     # lr_decay = LRDecay.SimulatedRestarts(learning_rate_max=learning_rate_max,
     #                                      learning_rate_min=learning_rate_min,
     #                                      t_0=t_0, t_mul=t_mul)
 
-    lr_decay = LRDecay.StepDecay(learning_rate=0.75, step=20, rate=0.5)
+    lr_decay = LRDecay.StepDecay(learning_rate=0.5, step=5000, rate=0.5)
 
-    solver = Solver.Simple(decay_algorithm=lr_decay, alpha=0.00001)
-    # solver = Solver.Momentum(decay_algorithm=lr_decay, momentum_rate=0.9)
-
-    hidden_size = [900]
-    learning_method = STOCHASTIC
-    batch_size = 512
+    hidden_size = (900,)
     network = create_network(hidden_size=hidden_size)
-    solver.set_network(network)
+
+    solver = Solver.Simple(network, decay_algorithm=lr_decay, alpha=0.0)
 
     # Saves information about the training
-    history = History(solver=network.solver, hidden_size=hidden_size, method=method_name[learning_method],
+    history = History(solver=solver, hidden_size=hidden_size, method=training_method,
                       batch_size=batch_size)
 
-    training_samples_num = X_train.shape[0]
+    training_samples_num = x_train.shape[0]
 
     epoch_num = 0
-    best_val_loss = np.inf
+    best_test_loss = np.inf
 
+    main_stats = Stats('Main Stats')
+    train_stats = main_stats.create_child_stats('Train Procedure')
+    train_v_stats = main_stats.create_child_stats('Train Set Validation')
+    test_v_stats = main_stats.create_child_stats('Test Set Validation')
+    saver_stats = main_stats.create_child_stats('Saver')
     while True:
-        # Full batch learning
-        if learning_method == FULL_BATCH:
-            for x, y in full_data_generator(X_train, y_train, 10000):
-                network.one_step(x, y)
-            network.finish_iteration()
+        with main_stats:
+            with train_stats:
+                # Full gradient descent learning
+                if training_method == 'epoch_gd':
+                    for x, y in full_data_generator(x_train, y_train, 10000):
+                        solver.one_step(x, y)
+                    solver.finish_iteration()
 
-        # Stochastic learning (random batch)
-        elif learning_method == STOCHASTIC:
+                # Stochastic learning (shuffled input data)
+                elif training_method == 'epoch_sgd':
+                    for x, y in full_stochastic_generator(x_train, y_train, batch_size):
+                        solver.one_step(x, y)
+                        solver.finish_iteration()
 
-            # It should not make a big difference if we don't use
-            # this last n=(training_samples % batch_size) samples
-            for j in range(int(training_samples_num/batch_size)):
-                x, y = stochastic_data(X_train, y_train, batch_size=batch_size)
-                network.one_iteration(x, y)
-                # Call to solver.advance() either here or at the end of the epoch
-                # solver.advance()
+                # Stochastic learning (random batch)
+                elif training_method == 'random_sgd':
+                    for j in range(int(training_samples_num/batch_size)):
+                        x, y = stochastic_data(x_train, y_train, batch_size=batch_size)
+                        solver.one_step(x, y)
+                        solver.finish_iteration()
 
-        # Stochastic learning (shuffled input data)
-        elif learning_method == STOCHASTIC_FULL:
-            for x, y in full_stochastic_generator(X_train, y_train, batch_size):
-                network.one_iteration(x, y)
+                print("\nResults from epoch %i:" % epoch_num)
+                print("Current learning rate %f" % lr_decay.learning_rate(solver.t))
 
-        print("\nResults from epoch %i:" % epoch_num)
-        print("Current learning rate %f" % lr_decay.learning_rate(solver.t))
+            with train_v_stats:
+                # Check train errors
+                train_acc, train_loss = check_performance(network, x=x_train, y=y_train)
+                print("Acc train: %f" % train_acc)
+                print("Loss train: %f" % train_loss)
 
-        # Check train errors
-        train_acc, train_loss = network.check_performance(x=X_train, y=y_train)
-        print("Acc train: %f" % train_acc)
-        print("Loss train: %f" % train_loss)
+            with test_v_stats:
+                # Check validation errors
+                test_acc, test_loss = check_performance(network, x=x_test, y=y_test)
+                print("Acc test: %f" % test_acc)
+                print("Loss test: %f" % test_loss)
 
-        # Check validation errors
-        val_acc, val_loss = network.check_performance(x=X_val, y=y_val)
-        print("Acc valid: %f" % val_acc)
-        print("Loss valid: %f" % val_loss)
+            with saver_stats:
+                history.add_sample(iter=epoch_num, train_acc=train_acc, valid_acc=test_acc,
+                                   train_loss=train_loss, valid_loss=test_loss)
 
-        history.add_sample(iter=epoch_num, train_acc=train_acc, valid_acc=val_acc,
-                           train_loss=train_loss, valid_loss=val_loss)
+                if test_loss < best_test_loss:
+                    best_test_loss = test_loss
+                    #network.save_net(Net.network_filename(experiment_number))
 
-        solver.advance()
+                epoch_num += 1
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            network.save_net(Net.network_filename(experiment_number))
+                #history.save(history_filename(experiment_number))
 
-        epoch_num += 1
 
-        history.save(history_filename(experiment_number))
-
+if __name__ == "__main__":
+    main()

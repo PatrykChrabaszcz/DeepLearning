@@ -34,7 +34,7 @@ class Activation:
             return
 
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             s = 1.0 / (1.0 + np.exp(-x))
             return s * (s-1)
 
@@ -44,7 +44,7 @@ class Activation:
             return np.tanh(x)
 
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             return 1-np.tanh(x)**2
 
     class Relu:
@@ -53,7 +53,7 @@ class Activation:
             return np.maximum(0.0, x)
 
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             dx = np.ones_like(x)
             dx[x < 0] = 0
             return dx
@@ -66,7 +66,7 @@ class Activation:
             return x_
 
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             dx = np.ones_like(x)
             dx[x < 0] = 0.1
             return dx
@@ -77,7 +77,7 @@ class Activation:
             return x
 
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             return 1
 
     class Softmax:
@@ -93,12 +93,20 @@ class Activation:
         # It's better to use CrossEntropyLoss with logits because some
         # equations will simplify
         @staticmethod
-        def f_d(x):
+        def f_grad(x):
             raise NotImplementedError
 
 
 # In decay(self, t) 't' should start from 0
 class LRDecay:
+
+    class NoDecay:
+        def __init__(self, learning_rate):
+            self.lr = learning_rate
+
+        def learning_rate(self, t):
+            return self.lr
+
     # After constant number of steps('step') decay by constant factor('rate')
     class StepDecay:
         def __init__(self, learning_rate, step, rate):
@@ -121,8 +129,8 @@ class LRDecay:
     # Updates only once for an epoch (no updates between mini batches)
     class SimulatedRestarts:
         def __init__(self, learning_rate_max, learning_rate_min, t_0, t_mul):
-            self.n_min = learning_rate_min
             self.n_max = learning_rate_max
+            self.n_min = learning_rate_min
             self.t_0 = t_0
             self.t_mul = t_mul
 
@@ -144,35 +152,43 @@ class LRDecay:
 
 class Solver:
     class Base:
-        def __init__(self):
-            self.network = None
+        def __init__(self, network):
+            self.network = network
             self.t = 0
 
-        # Has to be called after all layers are created
-        def set_network(self, network):
-            self.network = network
+        def one_step(self, x, y):
+            p = self.network.predict(x)
+            self.network.backward_pass(p, y)
 
-        def update_layer(self, layer):
-            w_update, b_update = self.compute_update(layer)
-            layer.update(w_update, b_update)
+        def finish_iteration(self):
+            self._update()
 
-        def advance(self):
+        def _update(self):
+            for l in self.network.layers:
+                delta_w, delta_b = self._compute_update(l)
+                l.update(delta_w, delta_b)
+            self._advance()
+
+        def _advance(self):
             self.t += 1
 
-        def compute_update(self, layer):
+        def _compute_update(self, layer):
             raise NotImplementedError
 
     class Simple(Base):
-        def __init__(self, decay_algorithm, alpha=0):
-            super().__init__()
+        def __init__(self, network, decay_algorithm, alpha=0.0):
+            super().__init__(network)
             self.decay_algorithm = decay_algorithm
             self.alpha = alpha
 
-        def compute_update(self, layer):
-            learning_rate = self.decay_algorithm.learning_rate(self.t)
-            w_update = -learning_rate * (layer.dw + self.alpha*layer.w)
-            b_update = -learning_rate * (layer.db + self.alpha*layer.b)
-            return w_update, b_update
+        def _compute_update(self, layer):
+            lr = self.decay_algorithm.learning_rate(self.t)
+            grad_w = layer.grad_w_acc.mean_gradient()
+            grad_b = layer.grad_b_acc.mean_gradient()
+            delta_w = -lr * (grad_w + self.alpha*layer.w)
+            delta_b = -lr * grad_b
+
+            return delta_w, delta_b
 
         def __str__(self):
             return "Solver Simple \n" + \
@@ -181,36 +197,27 @@ class Solver:
                    self.decay_algorithm.__str__()
 
     class Momentum(Base):
-        def __init__(self, decay_algorithm, momentum_rate, alpha=0):
-            super().__init__()
+        def __init__(self, network, decay_algorithm, momentum_rate=0.9, alpha=0.0):
+            super().__init__(network)
             self.decay_algorithm = decay_algorithm
             self.momentum_rate = momentum_rate
-            self.momentum = 0
             self.alpha = alpha
-
-        def set_network(self, network):
             self.network = network
+
+            # We store momentum values inside the layer objects
+            # Maybe it's better to keep them inside the optimizer ?
             for layer in self.network.layers:
                 layer.momentum_w = np.zeros_like(layer.w, dtype='float32')
                 layer.momentum_b = np.zeros_like(layer.b, dtype='float32')
 
-        def compute_update(self, layer):
-            learning_rate = self.decay_algorithm.learning_rate(self.t)
-            momentum_w = self.momentum_rate * layer.momentum_w - \
-                         learning_rate * (layer.dw + self.alpha * layer.w)
-            momentum_b = self.momentum_rate * layer.momentum_b - \
-                         learning_rate * (layer.db + self.alpha * layer.b)
-            return momentum_w, momentum_b
+        def _compute_update(self, layer):
+            lr = self.decay_algorithm.learning_rate(self.t)
+            grad_w = layer.grad_w_acc.mean_gradient()
+            grad_b = layer.grad_b_acc.mean_gradient()
+            layer.momentum_w = self.momentum_rate * layer.momentum_w - lr * (grad_w + self.alpha * layer.w)
+            layer.momentum_b = self.momentum_rate * layer.momentum_b - lr * grad_b
 
-        # Add new attribute to the layer class
-        def advance(self):
-            learning_rate = self.decay_algorithm.learning_rate(self.t)
-            for layer in self.network.layers:
-                layer.momentum_w = self.momentum_rate * layer.momentum_w - \
-                                   learning_rate * (layer.dw + self.alpha * layer.w)
-                layer.momentum_b = self.momentum_rate * layer.momentum_b - \
-                                   learning_rate * (layer.db + self.alpha * layer.b)
-            self.t += 1
+            return layer.momentum_w, layer.momentum_b
 
         def __str__(self):
             return "Solver Momentum \n" + \
@@ -263,30 +270,32 @@ class Metric:
         return acc
 
 
+# Accumulate gradients from multiple mini-batches
+# Computes the mean gradient
+class GradientAccumulator:
+    def __init__(self):
+        self.gradient = None
+        self.cnt = 0
+
+    def append(self, gradient):
+        self.gradient = gradient if self.gradient is None else self.gradient + gradient
+        self.cnt += 1
+
+    def mean_gradient(self):
+        return self.gradient / self.cnt
+
+    def reset(self):
+        self.gradient = None
+        self.cnt = 0
+
+
 class Net(object):
-    def __init__(self, solver, objective):
+    def __init__(self, objective):
         self.layers = []
-        self.solver = solver
         self.objective = objective
 
     def add_layer(self, layer):
         self.layers.append(layer)
-
-    # One way to train is to call one_interation()
-    # Weights will be updated after a single batch
-    def one_iteration(self, x, y):
-        p = self.predict(x)
-        self._backward_pass(p, y)
-        self._update()
-
-    # Other way to train is to call one_step() until
-    # all data is forwarded, then call finish_iteration()
-    def one_step(self, x, y):
-        p = self.predict(x)
-        self._backward_pass(p, y)
-
-    def finish_iteration(self):
-        self._update()
 
     # Forward pass through all layers
     def predict(self, x):
@@ -296,29 +305,10 @@ class Net(object):
         return p
 
     # Backward pass through all layers
-    def _backward_pass(self, p, y):
-        dl = self.objective.loss_d(pred=p, targ=y)
+    def backward_pass(self, p, y):
+        grad_loss = self.objective.loss_d(pred=p, targ=y)
         for l in self.layers[::-1]:
-            dl = l.backward_pass(dl)
-
-    def _update(self):
-        for l in self.layers:
-            l.average_gradients()
-            self.solver.update_layer(l)
-
-    # Returns loss and accuracy on provided data
-    def check_performance(self, x, y):
-        prediction_list = []
-        y_list = []
-        # Predict in chunks in case there is a lot of data
-        for x_, y_ in full_data_generator(x, y, 10000):
-            prediction_list.append(self.predict(x_))
-            y_list.append(y_)
-        prediction = np.concatenate(prediction_list, axis=0)
-        y = np.concatenate(y_list, axis=0)
-        acc = Metric.accuracy(prediction, y)
-        loss = np.mean(self.loss(prediction, y))
-        return acc, loss
+            grad_loss = l.backward_pass(grad_loss)
 
     def loss(self, p, y):
         return self.objective.loss(pred=p, targ=y)
@@ -342,7 +332,7 @@ class Net(object):
 
 
 class DenseLayer(object):
-    def __init__(self, activation, input_size_info=None, init_func=WeightInit.xavier_init_gauss,
+    def __init__(self, activation_func, input_size_info=None, init_func=WeightInit.xavier_init_gauss,
                  neurons_num=100):
         try:
             input_size = input_size_info.neurons_num
@@ -350,58 +340,41 @@ class DenseLayer(object):
             input_size = input_size_info
 
         self.neurons_num = neurons_num
+        self.activation_func = activation_func
+
         self.w = np.zeros(shape=(input_size, neurons_num), dtype='float32')
         self.b = np.zeros(shape=(1, neurons_num), dtype='float32')
         init_func(self)
 
-        self.x = None                       # Input
-        self.dx = None                      # Gradient w.r.t. input (List for data chunks)
-        self.dw = np.zeros_like(self.w)     # Gradient w.r.t. weights (List for data chunks)
-        self.db = np.zeros_like(self.b)     # Gradient w.r.t. biases (List for data chunks)
+        # In some settings we want to use the mean gradient from
+        # multiple mini-batches or even from the whole dataset.
+        self.grad_w_acc = GradientAccumulator()
+        self.grad_b_acc = GradientAccumulator()
 
-        # Lists used for gradient averaging
-        self.dx_list = []
-        self.dw_list = []
-        self.db_list = []
-        self.s_list = []
+        self.x = None   # Input x
         self.a = None   # x @ w
         self.y = None   # Output
-        self.activation = activation
 
     def forward_pass(self, x):
         self.x = x
         self.a = x @ self.w + self.b
-        self.y = self.activation.f(self.a)
+        self.y = self.activation_func.f(self.a)
         return self.y
 
-    def backward_pass(self, dl):
-        da = dl * self.activation.f_d(self.a)
-        self.db = da.mean(axis=0)
-        self.dw = self.x.T @ da / self.x.shape[0]
-        self.dx = da @ self.w.T
-        s = self.x.shape[0]
+    def backward_pass(self, grad_loss):
+        grad_a = grad_loss * self.activation_func.f_grad(self.a)
+        grad_b = grad_a.mean(axis=0)
+        grad_w = self.x.T @ grad_a / self.x.shape[0]
+        grad_x = grad_a @ self.w.T
 
         # Store gradients from batches until next update is called
-        self.db_list.append(self.db)
-        self.dw_list.append(self.dw)
-        self.dx_list.append(self.dx)
-        self.s_list.append(s)
+        self.grad_b_acc.append(grad_b)
+        self.grad_w_acc.append(grad_w)
 
-        return self.dx
+        return grad_x
 
-    def average_gradients(self):
-        # Not sure if it's nice that self.dw type changes from list to scalar
-        s = self.s_list/np.sum(self.s_list)
-        self.dw = np.average(a=self.dw_list, axis=0, weights=s)
-        # self.db has to be the same shape as self.b, it has to be 2 dimensional
-        self.db = np.array([np.average(a=self.db_list, axis=0, weights=s)])
-
-    def update(self, dw, db):
-        self.w += dw
-        self.b += db
-
-        # Clear lists with gradients
-        self.db_list = []
-        self.dw_list = []
-        self.dx_list = []
-        self.s_list = []
+    def update(self, delta_w, delta_b):
+        self.w += delta_w
+        self.b += delta_b
+        self.grad_w_acc.reset()
+        self.grad_b_acc.reset()
